@@ -1,4 +1,4 @@
-#!/usr/bin/node
+/* eslint-disable no-with */
 /* eslint-disable no-unused-vars */
 const read = require("readline-sync")
 const fs = require("fs")
@@ -9,6 +9,7 @@ const Tokens = {
     NEWLINE:"\n",
     STRING:"\""
 }
+
 var argv = require('minimist')(process.argv.slice(2));
 const { execSync } = require('child_process');
 /**
@@ -26,6 +27,10 @@ const MEMORY = [0xFFFF,0x1,0xFFFF]
 const LABEL = {}
 const END = "\uFFFF"
 var RESULT = 0
+const STACK = []
+var LOCALFS = false;
+var LocalFileSystem = []
+var GFS = false;
 
 const PREFERNCES = {
     SHOULD_STDIN: true,
@@ -73,7 +78,7 @@ if("help" in argv || "h" in argv || "?" in argv || argv._.includes("/?") || argv
             --nostdin, --noinput: stops stdin syscall
             --handicap, --tty, -t: duplicates stdout, stderr to stdtty
             --repl, -r: Starts interactive REPL session
-            --file=filename: Reads asm from file
+            ...files: assembely files to parse
     `)
     process.exit()
 }
@@ -97,6 +102,9 @@ function UndefinedLabelError(msg){
     return new String("UndefinedInstructionPointerException: "+msg)
 }
 
+/**
+ * @class Implementation of Registers
+ */
 class Register{
     constructor(name="eax",value=0){
         this.namel = name
@@ -124,6 +132,10 @@ class Register{
         return false
     }
 
+    /**
+     * Returns value of selected register
+     * @returns {number} value
+     */
     getValue(){
         if(!this.nameTest()){
             ASSERT(typeof this.namel,"string")
@@ -194,7 +206,7 @@ class Pointer{
     }
     setValue(val){
         if(!this._nullPtrTest(this.memaddr)){
-            throw NullPtrError(this.memaddr + " address does not exist")
+            //throw NullPtrError(this.memaddr + " address does not exist")
         }
         if(!this._byteTest(val)){
             throw RegistryError("value is not a byte")
@@ -230,6 +242,9 @@ class Parser{
             if(lc.includes(Tokens.Keyword_LABEL_START)){
                 in_label = true
                 label_name = lc.split(" ")[1]
+                if(label_name.startsWith(":")){
+                    label_name = label_name.replace(":","")
+                }
                 parsed_label_commands = []
                 continue
             }
@@ -247,7 +262,7 @@ class Parser{
                     throw new SyntaxError("Internal error")
                 }
                 in_label = false
-                parsed_lines.push({str:(`label("${label_name}",()=>{`+Parser.Parser2(parsed_label_commands)+`});`),parsed:true})
+                parsed_lines.push({str:(`\nlabel("${label_name}",()=>{\n`+Parser.Parser2(parsed_label_commands)+`})\n`),parsed:true})
                 continue
             }
 
@@ -274,10 +289,11 @@ class Parser{
                     
                     if(split[token_num].endsWith("h")){
                         var tester = `0x${split[token_num].replace("h","")}`
-                        if(typeof +tester==="number"){
+                        if(+tester===+tester){
                             split[token_num] = tester
                         }else{
-                            throw new SyntaxError("Illegal hexadecimal notation: "+split[token_num])
+                            //throw new SyntaxError("Illegal hexadecimal notation: "+split[token_num]) // ?HACK: Disable this for now, commands that end with h does not work
+                            // TODO: Remember to implement ASCII Parser
                         }
                     }else{
                         continue
@@ -303,21 +319,52 @@ class Parser{
                 continue
             }
             var lex = lex_obj.arr
+            if(lex[0].includes(";")){
+                continue
+            }
             lex[0] = lex[0]+"("
+            var comment = false
+
+            var i=0;
+            // eslint-disable-next-line no-constant-condition
             lex.push(")")
-            for(var i in lex){
+            i = 0
+            for(i in lex){
                 lex[i] = lex[i].replace("[","(")
                 lex[i] = lex[i].replace("]",")")
+                if(i!==0&&lex[0].includes("j")&&lex[i].startsWith(":")){
+                    lex[i] = lex[i].replace(":","")
+                    lex[i] = `"${lex[i]}"`
+                }
             }
-            evalstr+=`${lex.join(",")}\n`
+            var chunk = `${lex.join(",")}\n`
+
+
+            if(/;/.test(chunk)){
+                chunk = chunk.replace(";","/*")
+                var unchunk = chunk.split("")
+                if (unchunk[unchunk.length-1].includes(")")){
+                    unchunk[unchunk.length-1]="*/"+unchunk[unchunk.length-1]
+                }
+                
+                chunk = unchunk.join("")
+                chunk = chunk.replace(/\)\*\//gmi,"*/)")
+                chunk = chunk.replace(/\*\*/gmi,"")
+            }
+
+            evalstr+=chunk
         }
-        console.log(evalstr)
-        evalstr = evalstr.replace(/\n/gmi,";")
+        //?console.log(evalstr)
+        //evalstr = evalstr.replace(/\n/gmi,";")
         evalstr = evalstr.replace(/\(,/gmi,"(")
         evalstr = evalstr.replace(/,\)/gmi,")")
         evalstr = evalstr.replace(/"\./gmi,"\uFFFF\"")
+        evalstr = evalstr.replace(/\)\*\//gmi,"*/)")
+        evalstr = evalstr.replace(/\*\*/gmi,"")
+        //!!!!!!!!!evalstr = evalstr.replace(/\)/gmi,"*/)")
 
-        console.log(evalstr)
+
+        //?console.log(evalstr)
         return evalstr
     }
 
@@ -326,10 +373,95 @@ class Parser{
     }
 }
 
+class Stack{
+    static Push(val){
+        STACK.push(val)
+        //? console.log(`stack: push: value: ${val}`)
+    }
+    static Pop(){
+        if(STACK.length === 0){
+            return 0xFFFF
+        }else{
+            var c = STACK.pop()
+            //? console.log(`stack: pull: value: ${c}`)
+            return c
 
+        }
+    }
+}
 
+// TODO: More optimisations will be useful: FileExtensionLimit
+class FileSystemAPI{
+    static InitalizeLocalFileSystem(){
+        LocalFileSystem = this.DumpFileContent().toString().split("")
+        LOCALFS = true;
+    }
+    static SaveLocalFileSystemToFile(){
+        if(!LOCALFS){return}
+        var buffer = Buffer(LocalFileSystem.join(""),"utf8")
+        fs.writeFileSync("data.fs", buffer)
+    }
+    static WriteByteAtLocalFileSystem(location,byte){
+        if(location > LocalFileSystem.length){
+            if(GFS){
+                var prevlength = LocalFileSystem.length-1;
+                LocalFileSystem[location] = String.fromCharCode(byte)
+                for(var i = prevlength ;i < LocalFileSystem.length; i++){
+                    if(LocalFileSystem[i] === undefined){
+                        LocalFileSystem[i] = "\u0000"
+                    }
+                }
+                return
+            }else{
+                throw new Error("FileSystemError: Cannot set a byte out of bounds without initalizing GrowableFileSystemAPI!")
+            }
+        }
+        LocalFileSystem[location] = String.fromCharCode(byte)
+    }
+    static ReadByteAtLocalFileSystem(location){
+        if(LocalFileSystem[location] === undefined){
+            return 0x0;
+        }
+        return LocalFileSystem[location].charCodeAt(0)
+    }
+    static InitalizeGrowableFileSystem(){
+        if(!LOCALFS){throw new Error("FileSystemError: Cannot initalize GrowableFileSystem without inializing LocalFileSystem")}
+        GFS = true;
+    }
+    static DumpFileContent(){
+        return fs.readFileSync("data.fs")
+    }
+    static ReadByte(location){
+        if(LOCALFS){return this.ReadByteAtLocalFileSystem(location)}
+        var buff = fs.readFileSync("data.fs")
+        //? console.log(`Read request: location: ${location}, value: ${buff[location].toString().charCodeAt(0)}`)
+        return buff.toString().charCodeAt(location)
+    }
+    static WriteByte(location,byte){
+        if(LOCALFS){this.WriteByteAtLocalFileSystem(location, byte); return}
+        //? console.log(`data: ${byte}, location: ${location}`)
+        var prevbuff = this.DumpFileContent()
+        var theArray = prevbuff.toString().split("")
+        theArray[location] = String.fromCharCode(byte)
+        var theStr = theArray.join("")
+        var theBuffAgain = Buffer(theStr,"utf8")
+        //? if(prevbuff === theBuffAgain){console.log("no")}
+        fs.writeFileSync("data.fs",theBuffAgain)
+    }
+    static InitalizeFile(){
+        var buff = new Buffer(String.fromCharCode(0x0).repeat(0xFFFF),"utf8")
+        fs.writeFileSync("data.fs", buff)
+    }
+    static IsFileInitalized(){
+        var is = fs.existsSync("./data.fs")
+        return is
+    }
+}
+
+//var FileSystemAPI = Proxy()
 function AllocateMemory(start=0x1,end=0xFFFF){
     if(!((typeof start === "number") || (typeof end === "number"))){
+        //console.log(start+" "+end)
         throw RegistryError("error in allocating memory. NaN")
     }else if(((start === Infinity) || (end === Infinity))){
         throw RegistryError("error in allocating memory. Out of bounds")
@@ -411,6 +543,7 @@ function IntPtrAddrToInt_noop(any){
 }
 
 function MoveValToDT(dt,val){
+    //? console.log(dt)
     IfNotStorageThrow(dt)
     if (dt instanceof Register){
         val = IntPtrAddrToInt(val) // !Pointers can reference pointers(no)
@@ -444,10 +577,30 @@ function JumpIfFalse(ins){
     }
 }
 
-function CompareAndReturn(val1,val2){
+function CompareAndReturn_eq(val1,val2){
     val1 = IntPtrAddrToInt(val1)
     val2 = IntPtrAddrToInt(val2)
     if(val1 === val2){
+        RESULT = 1
+    }else{
+        RESULT = 0
+    }
+}
+
+function CompareAndReturn_gt(val1,val2){
+    val1 = IntPtrAddrToInt(val1)
+    val2 = IntPtrAddrToInt(val2)
+    if(val1 > val2){
+        RESULT = 1
+    }else{
+        RESULT = 0
+    }
+}
+
+function CompareAndReturn_lt(val1,val2){
+    val1 = IntPtrAddrToInt(val1)
+    val2 = IntPtrAddrToInt(val2)
+    if(val1 < val2){
         RESULT = 1
     }else{
         RESULT = 0
@@ -504,6 +657,21 @@ class SystemCallReg{
         SYSTEMCALLREG.push(new SystemCall(hook,callback))
     }
 }
+
+SystemCallReg.Add("filesystem",0x34,()=>{
+    var eaxv = eax.getValue()
+    var ebxv = ebx.getValue()
+    var ecxv = ecx.getValue()
+
+    switch(eaxv){
+        case 0: (()=>{
+            ax.setValue(FileSystemAPI.ReadByte(ebxv))
+        })(); break
+        case 1:(()=>{
+            FileSystemAPI.WriteByte(ebxv, ecxv)
+        })(); break
+    }
+})
 
 SystemCallReg.Add("program",0x21,()=>{
     var eaxr = eax.getValue()
@@ -571,7 +739,7 @@ SystemCallReg.Add("stdio",0x10,()=>{
             }
             var ans = read.question("")
             ans = ans.split("",ecxr)
-            ans = ans.toString()
+            ans = ans.join("")
             ans.replace("\n","")
             FillMemoryWithBytes(ebxr,ans)
         })(); break;
@@ -586,7 +754,53 @@ SystemCallReg.Add("stdio",0x10,()=>{
 })
 
 
+SystemCallReg.Add("tts",0x60,()=>{
+    var eaxr = eax.getValue()
+    var ebxr = ebx.getValue()
 
+    switch (eaxr){
+        case 0:(()=>{
+            var wholeStr = ""
+            for(var addr=ebxr;addr< 9000+ebxr;addr+=0x1){
+                if (addr > ebxr+0xFFFF){
+                    return
+                }
+                AllocateMemory(addr,addr+0x1)
+                var char = (new Pointer(addr)).getValue()
+                if(char === 0xFFFF){
+                    break
+                }
+                if(char === (",".charCodeAt(0)) && PREFERNCES.FILE_MODE){
+                    char = 0x20
+                }
+                wholeStr += String.fromCharCode(char)
+            }
+            //console.log("ihihihugu")
+            if(wholeStr.length>1000){
+                // eslint-disable-next-line no-inner-declarations
+                function chunkSubstr(str, size) {
+                    const numChunks = Math.ceil(str.length / size)
+                    const chunks = new Array(numChunks)
+                  
+                    for (let i = 0, o = 0; i < numChunks; ++i, o += size) {
+                      chunks[i] = str.substr(o, size)
+                    }
+                  
+                    return chunks
+                }
+                var chunks = chunkSubstr(wholeStr,100)
+                for(var chunk of chunks){
+                    execSync(`spd-say --voice=male3 --pitch=100 --volume=100 "${(chunk.replace("-","\\-")).replace("\n","")}"`)
+                    sleep((chunk.length/18))
+                }
+            }else{
+                execSync(`spd-say --voice=male3 --pitch=100 --volume=100 "${(wholeStr.replace("-","\\-")).replace("\n","")}"`)
+                sleep((wholeStr.length/15)+1)
+            }
+        })();break;
+        default:throw "exited"
+    }
+})
 
 
 //module.exports = {SYSTEMCALLREG,SystemCallReg,SystemCall}
@@ -612,10 +826,10 @@ var ecx = new Register("ecx")
 var edx = new Register("edx")
 
 // 64 bit
-var rax = new Register("RAX")
-var rbx = new Register("RBX")
-var rcx = new Register("RCX")
-var rdx = new Register("RDX")
+var rax = new Register("rax")
+var rbx = new Register("rbx")
+var rcx = new Register("rcx")
+var rdx = new Register("rdx")
 
 ASSERT(typeof eax.getValue,"function")
 ASSERT(eax.namel, "eax")
@@ -627,6 +841,8 @@ ASSERT(eax.namel, "eax")
 
 //console.log(global)
 function mov(dt,val){
+    val = IntPtrAddrToInt(val)
+    //console.log(dt)
     MoveValToDT(dt,val)
 }
 function ptr(address){
@@ -635,17 +851,71 @@ function ptr(address){
 function alloc(s,e){
     s = IntPtrAddrToInt(s)
     e = IntPtrAddrToInt(e)
+    //console.log(`start ${s} end ${e}`)
     AllocateMemory(s,e)
 }
 const add = function(dt,val){
+    //console.log(dt)
     var dtval = IntPtrAddrToInt(dt)
     val = IntPtrAddrToInt(val)
     MoveValToDT(dt,dtval+val)
+}
+let sub = function(dt,val){
+    var dtval = IntPtrAddrToInt(dt)
+    val = IntPtrAddrToInt(val)
+    MoveValToDT(dt,dtval-val)
+}
+let mul = function(dt,val){
+    var dtval = IntPtrAddrToInt(dt)
+    val = IntPtrAddrToInt(val)
+    MoveValToDT(dt,dtval*val)
+}
+let div = function(dt,val){
+    var dtval = IntPtrAddrToInt(dt)
+    val = IntPtrAddrToInt(val)
+    MoveValToDT(dt,dtval/val)
+}
+let and = function(dt,val){
+    var dtval = IntPtrAddrToInt(dt)
+    val = IntPtrAddrToInt(val)
+    MoveValToDT(dt,dtval&val)
+}
+let or = function(dt,val){
+    var dtval = IntPtrAddrToInt(dt)
+    val = IntPtrAddrToInt(val)
+    MoveValToDT(dt,dtval|val)
+}
+let xor = function(dt,val){
+    //console.log(`dhiwhd ${dt}`)
+    var dtval = IntPtrAddrToInt(dt)
+    val = IntPtrAddrToInt(val)
+    MoveValToDT(dt,dtval^val)
+}
+let not = function(dt){
+    var dtval = IntPtrAddrToInt(dt)
+   // var val = IntPtrAddrToInt(dt)
+    MoveValToDT(dt,~dtval)
+}
+let inc = function(dt){
+    var dtval = IntPtrAddrToInt(dt)
+   // var val = IntPtrAddrToInt(dt)
+    MoveValToDT(dt,dtval+1)
+}
+let dec = function(dt){
+    var dtval = IntPtrAddrToInt(dt)
+   // var val = IntPtrAddrToInt(dt)
+    MoveValToDT(dt,dtval-1)
+}
+let zero = function(dt){
+    //var dtval = IntPtrAddrToInt(dt)
+   // var val = IntPtrAddrToInt(dt)
+    MoveValToDT(dt,0)
 }
 function free(s,e){
     FreeMemory(s,e)
 }
 function db(s,str){
+    s = IntPtrAddrToInt(s)
     FillMemoryWithBytes(s,str)
 }
 function int(hook){
@@ -659,7 +929,13 @@ function jmp(lt){
 }
 
 function cmp(val1,val2){
-    CompareAndReturn(val1,val2)
+    CompareAndReturn_eq(val1,val2)
+}
+function cgt(val1,val2){
+    CompareAndReturn_gt(val1,val2)
+}
+function clt(val1,val2){
+    CompareAndReturn_lt(val1,val2)
 }
 function je(label){
     JumpIfTrue(label)
@@ -676,14 +952,42 @@ function jle(label){
 let hook = function(label,syscall){
     SystemCallReg.Add("custom_hook",syscall,LABEL[label])
 }
+let push = function(val){
+    val = IntPtrAddrToInt(val)
+    Stack.Push(val)
+}
+let pop = function(val){
+    MoveValToDT(val,Stack.Pop())
+}
 
+let $res = function(val){
+    MoveValToDT(val,RESULT)
+}
 
-if("file" in argv){
-    console.warn("Warning: Experimental feature! Leave before the bugs bite you!") // TODO: Remove this stupid line
-    if(!fs.existsSync("./"+argv["file"])){
-       throw new String("Error in accessing file: "+argv["file"])
-    }
-    eval(Parser.Parser((fs.readFileSync(argv["file"]).toString())))
+if(!FileSystemAPI.IsFileInitalized()){FileSystemAPI.InitalizeFile()}
+FileSystemAPI.InitalizeLocalFileSystem()
+FileSystemAPI.InitalizeGrowableFileSystem()
+
+process.on('SIGINT', function() {
+    FileSystemAPI.SaveLocalFileSystemToFile()
+    process.exit();
+});
+
+if(argv._.length !== 0){
+    //console.log(argv._)
+  //console.warn("Warning: Experimental feature! Leave before the bugs bite you!") // TODO: Remove this stupid line
+  for(var file of argv._){
+    if(!fs.existsSync(`./${file}`)){
+        throw new String("Error in accessing file: "+file)
+     }
+     try{
+        eval(Parser.Parser((fs.readFileSync(file).toString()))+"\n\n\n jmp('main')")
+     }finally{
+         FileSystemAPI.SaveLocalFileSystemToFile()
+     }
+
+  }
+    
     process.exit()
 }
 ////
@@ -691,10 +995,14 @@ if("file" in argv){
 ////
 if("repl" in argv ? argv["repl"] : false){
     console.log("Interactive REPL session")
-    var exit = function(){
-        process.exit()
+    class exit
+    {
+        constructor ()
+        {
+            process.exit();
+        }
+        static toString () { return "call exit() or press Ctrl+C to exit"; }
     }
-    exit.toString = ()=>{return "call exit() or press Ctrl+C to exit"}
     var cls = function(){
         execSync("clear")
     }
@@ -724,158 +1032,7 @@ if("repl" in argv ? argv["repl"] : false){
 
 // eslint-disable-next-line no-empty
 try{
-    db(0x1000,"Welcome to ButtOS\n"+END)
-db(0x1100,"Booting BuTTOS...\n"+END)
-db(0x1050,"Configuring Shell...\n"+END)
-db(0x1200,"Shuting down BuTTOS...\n"+END)
-db(0x1300,"MOTD: Increase your butt!!!\n"+END)
-db(0x1400,"--- starting basic shell. help for commands, exit to shutdown ---\n"+END)
-db(0x1500,"HELP: Commands are ECHO, BUTT, MOTD, RAND, LOTT, 0RUN, QUIT AND EXIT\n"+END)
-db(0x1600,"BUTTSH:> "+END)
-db(0x1700,"Your butt is: FAT!\n"+END)
-
-db(0x10,"E")
-db(0x11,"B")
-db(0x12,"M")
-db(0x13,"R")
-db(0x14,"L")
-db(0x15,"0")
-db(0x16,"Q")
-db(0x17,"X")
-
-// section .boot
-
-label("boot",()=>{
-    mov(eax,0x2)
-    int(0x10)
-    mov(eax,0x0)
-    mov(ebx,0x1100)
-    int(0x10)
-    alloc(0x0,0xFFFFFF)
-    mov(ebx,0x1000)
-    int(0x10)
-    mov(ebx,0x1400)
-    int(0x10)
-})
-
-// section .shell
-
-label("shell",()=>{
-    mov(eax,0x0)
-    mov(ebx,0x1600)
-    int(0x10)
-    mov(eax,0x1)
-    mov(ebx,0x100)
-    mov(ecx,0xFFFF)
-    int(0x10)
-    mov(rax,0x10)
-    jmp("parse")
-    cmp(rax,0x0)
-    je("cmd_echo")
-    cmp(rax,0x1)
-    je("cmd_butt")
-    cmp(rax,0x2)
-    je("cmd_motd")
-    cmp(rax,0x3)
-    je("cmd_echo")
-    cmp(rax,0x4)
-    je("cmd_echo")
-    cmp(rax,0x5)
-    je("cmd_echo")
-    cmp(rax,0x6)
-    je("cmd_quit")
-    cmp(rax,0x7)
-    je("cmd_exit")
-
-    cmp(0x0,0x1)
-})
-
-
-label("cmd_exit",()=>{
-    mov(eax,0x0)
-    mov(ebx,0x1200)
-    int(0x10)
-    free(0x0,0xFFFFFF)
-    mov(eax,0x2)
-    int(0x10)
-    int(0x21)
-})
-
-label("cmd_quit",()=>{
-    alloc(0x0,0xFFFFFFFFFF)
-})
-
-label("cmd_motd",()=>{
-    mov(eax,0x0)
-    mov(ebx,0x1300)
-    int(0x10)
-})
-
-label("cmd_butt",()=>{
-    mov(eax,0x0)
-    mov(ebx,0x1700)
-    int(0x10)
-})
-
-label("setecho",()=>{
-    mov(rax,0x0)
-})
-
-label("setbutt",()=>{
-    mov(rax,0x1)
-})
-
-label("setmotd",()=>{
-    mov(rax,0x2)
-})
-
-label("setrand",()=>{
-    mov(rax,0x3)
-})
-
-label("setlott",()=>{
-    mov(rax,0x4)
-})
-
-label("set0run",()=>{
-    mov(rax,0x5)
-})
-
-label("setquit",()=>{
-    mov(rax,0x6)
-})
-
-label("setexit",()=>{
-    mov(rax,0x7)
-})
-
-label("checkE",()=>{
-    cmp(ptr(0x101),ptr(0x17))
-    je("setexit")
-    jne("setecho")
-})
-
-label("parse",()=>{
-    cmp(ptr(0x100),ptr(0x10))
-    je("checkE")
-    cmp(ptr(0x100),ptr(0x11))
-    je("setbutt")
-    cmp(ptr(0x100),ptr(0x12))
-    je("setmotd")
-    cmp(ptr(0x100),ptr(0x13))
-    je("setrand")
-    cmp(ptr(0x100),ptr(0x14))
-    je("setlott")
-    cmp(ptr(0x100),ptr(0x15))
-    je("set0run")
-    cmp(ptr(0x100),ptr(0x16))
-    je("setquit")
-})
-
-// section .main
-
-jmp("boot")
-jle("shell")
+   //
 }catch(e){
     if (PREFERNCES.SHOULD_TTS){
         execSync(`spd-say --voice=female2 --pitch=50 --volume=100 "${(String(e)).replace("\n","").replace("-","\\")}. Fatal error. Press enter to continue"`)

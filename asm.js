@@ -9,7 +9,32 @@ const Tokens = {
     NEWLINE:"\n",
     STRING:"\""
 }
-
+const TranslationTable={
+    ":>":"mov",
+    "|":"or",
+    "!":"int",
+    "^":"xor",
+    "<<":"push",
+    ">>":"pop",
+    "++":"inc",
+    "--":"dec",
+    "+":"add",
+    "-":"sub",
+    "*":"mul",
+    "/":"div",
+    "&":"and",
+    "?=":"cmp",
+    "?>":"cgt",
+    "?<":"clt",
+    "@>":"jmp",
+    "@=":"je",
+    "@!=":"jne",
+    "@@=":"jl",
+    "@@!=":"jle",
+    "~":"not",
+    "::":"hook",
+    "#":"db"
+}
 var argv = require('minimist')(process.argv.slice(2));
 const { execSync } = require('child_process');
 /**
@@ -31,6 +56,7 @@ const STACK = []
 var LOCALFS = false;
 var LocalFileSystem = []
 var GFS = false;
+var TFS = false;
 
 const PREFERNCES = {
     SHOULD_STDIN: true,
@@ -82,14 +108,6 @@ if("help" in argv || "h" in argv || "?" in argv || argv._.includes("/?") || argv
     `)
     process.exit()
 }
-
-if("file" in argv){
-    PREFERNCES.FILE_MODE=true
-}
-
-
-
-
 function RegistryError(msg){
     return new String("RegistryError: "+msg)
 }
@@ -106,10 +124,12 @@ function UndefinedLabelError(msg){
  * @class Implementation of Registers
  */
 class Register{
-    constructor(name="eax",value=0){
+    constructor(name="",value=0){
+        if(name===""){return} // Abort if name is empty (proxy support)
         this.namel = name
         this.valuel = value
-        return this
+        // this.proxies = []
+        //return this
     }
 
     nameTest(){
@@ -161,11 +181,35 @@ class Register{
         }
         eval(`${this.namel}.valuel = ${val}`)
     }
+
 }
 
 
-
-
+/**
+ * Creates a interface to another register. Acts as a psudo-register
+ * @param {Register} proxy_reg The register to interface
+ */
+class RegisterProxy extends Register{
+    constructor(regold=new Register("qqq",1)){
+        super()
+        this.regold = regold
+    }
+    get namel(){
+        return this.regold.namel
+    }
+    get valuel(){
+        return this.regold.getValue()
+    }
+    set valuel(v){
+        this.regold.setValue(v)
+    }
+    getValue(){
+        return this.regold.getValue()
+    }
+    setValue(val){
+        this.regold.setValue(val)
+    }
+}
 
 class Pointer{
     constructor(mem){
@@ -175,7 +219,6 @@ class Pointer{
         if(!(typeof mem === "number")){
             throw NullPtrError(mem.toString()+" is not a memory address")
         }
-        
 
         this.memaddr = mem
     }
@@ -186,7 +229,6 @@ class Pointer{
         if(val instanceof Pointer){
             return true
         }
-        
         return false
     }
     _nullPtrTest(mem){
@@ -286,7 +328,6 @@ class Parser{
 
             for(var token_num in split){
                 if(+split[token_num] !== +split[token_num]){
-                    
                     if(split[token_num].endsWith("h")){
                         var tester = `0x${split[token_num].replace("h","")}`
                         if(+tester===+tester){
@@ -298,6 +339,12 @@ class Parser{
                     }else{
                         continue
                     }
+                }
+            }
+
+            for(var symbol in TranslationTable){
+                if(split[0] === symbol){
+                    split[0] = TranslationTable[symbol]
                 }
             }
 
@@ -346,7 +393,7 @@ class Parser{
                 if (unchunk[unchunk.length-1].includes(")")){
                     unchunk[unchunk.length-1]="*/"+unchunk[unchunk.length-1]
                 }
-                
+
                 chunk = unchunk.join("")
                 chunk = chunk.replace(/\)\*\//gmi,"*/)")
                 chunk = chunk.replace(/\*\*/gmi,"")
@@ -390,7 +437,7 @@ class Stack{
     }
 }
 
-// TODO: More optimisations will be useful: FileExtensionLimit
+// TODO: More optimisations will be useful: FileExtensionLimit, FileSystemCache, FileSystemZeroTable
 class FileSystemAPI{
     static InitalizeLocalFileSystem(){
         LocalFileSystem = this.DumpFileContent().toString().split("")
@@ -398,6 +445,14 @@ class FileSystemAPI{
     }
     static SaveLocalFileSystemToFile(){
         if(!LOCALFS){return}
+        if(TFS){
+            var lastGoodData = 0
+            var len = LocalFileSystem.length
+            for(var i = 0; i < len; i++){if(LocalFileSystem[i]!=="\u0000"){lastGoodData=i}}
+            if(!(lastGoodData === len)){
+                for(var j = 0; j < (len - lastGoodData)-1; j++){LocalFileSystem.pop()}
+            }
+        }
         var buffer = Buffer(LocalFileSystem.join(""),"utf8")
         fs.writeFileSync("data.fs", buffer)
     }
@@ -425,8 +480,12 @@ class FileSystemAPI{
         return LocalFileSystem[location].charCodeAt(0)
     }
     static InitalizeGrowableFileSystem(){
-        if(!LOCALFS){throw new Error("FileSystemError: Cannot initalize GrowableFileSystem without inializing LocalFileSystem")}
+        if(!LOCALFS){throw new Error("FileSystemError: Cannot initalize GrowableFileSystem without initalizing LocalFileSystem")}
         GFS = true;
+    }
+    static InitalizeTruncatableFileSystem(){
+        if(!GFS){throw new Error("FileSystemError: Cannot initalize TruncatableFileSystem without initalizing GrowableFileSystem")}
+        TFS = true;
     }
     static DumpFileContent(){
         return fs.readFileSync("data.fs")
@@ -536,7 +595,6 @@ function IntPtrAddrToInt_noop(any){
     }else if(any instanceof Pointer){
         return any
     }
-    
     else{
         throw "\n\n\u0FF8"
     }
@@ -728,8 +786,8 @@ SystemCallReg.Add("stdio",0x10,()=>{
                 }
                 process.stdout.write(String.fromCharCode(char))
             }
-        
-            
+
+
         })(); break;
         case 1:(()=>{ //1-> stdin
             if(!PREFERNCES.SHOULD_STDIN){
@@ -781,11 +839,11 @@ SystemCallReg.Add("tts",0x60,()=>{
                 function chunkSubstr(str, size) {
                     const numChunks = Math.ceil(str.length / size)
                     const chunks = new Array(numChunks)
-                  
+
                     for (let i = 0, o = 0; i < numChunks; ++i, o += size) {
                       chunks[i] = str.substr(o, size)
                     }
-                  
+
                     return chunks
                 }
                 var chunks = chunkSubstr(wholeStr,100)
@@ -830,6 +888,26 @@ var rax = new Register("rax")
 var rbx = new Register("rbx")
 var rcx = new Register("rcx")
 var rdx = new Register("rdx")
+
+// psudo-registers
+
+// 32 bit
+var r0 = new RegisterProxy(eax)
+var r1 = new RegisterProxy(ebx)
+var r2 = new RegisterProxy(ecx)
+var r3 = new RegisterProxy(edx)
+
+// 16 bit
+var r4 = new RegisterProxy(ax)
+var r5 = new RegisterProxy(bx)
+var r6 = new RegisterProxy(cx)
+var r7 = new RegisterProxy(dx)
+
+// 64 bit
+var r8 = new RegisterProxy(rax)
+var r9 = new RegisterProxy(rbx)
+var r10 = new RegisterProxy(rcx)
+var r11 = new RegisterProxy(rdx)
 
 ASSERT(typeof eax.getValue,"function")
 ASSERT(eax.namel, "eax")
@@ -967,6 +1045,7 @@ let $res = function(val){
 if(!FileSystemAPI.IsFileInitalized()){FileSystemAPI.InitalizeFile()}
 FileSystemAPI.InitalizeLocalFileSystem()
 FileSystemAPI.InitalizeGrowableFileSystem()
+FileSystemAPI.InitalizeTruncatableFileSystem()
 
 process.on('SIGINT', function() {
     FileSystemAPI.SaveLocalFileSystemToFile()
@@ -981,13 +1060,14 @@ if(argv._.length !== 0){
         throw new String("Error in accessing file: "+file)
      }
      try{
+        label("main",()=>{})
         eval(Parser.Parser((fs.readFileSync(file).toString()))+"\n\n\n jmp('main')")
      }finally{
          FileSystemAPI.SaveLocalFileSystemToFile()
      }
 
   }
-    
+
     process.exit()
 }
 ////

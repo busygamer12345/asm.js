@@ -1,5 +1,5 @@
 # asm.js
 
-## parse assembely easily!
+## parse assembly easily!
 
 TODO: Add a nice readme

@@ -1,0 +1,24 @@
+{
+  "name": "js_assembely",
+  "version": "0.0.1",
+  "description": "Assembely in javascript",
+  "main": "asm.js",
+  "dependencies": {
+    "@types/node": "^12.7.2",
+    "readline-sync": "^1.4.10",
+    "typescript": "^3.5.3"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.5.5",
+    "@babel/preset-env": "^7.5.5",
+    "babel-core": "^6.26.3",
+    "eslint": "^6.3.0",
+    "eslint-config-google": "^0.14.0"
+  },
+  "scripts": {
+    "test": "echo \"No tests possible\"",
+    "run": "node asm.js"
+  },
+  "author": "busygamer12345",
+  "license": "GPL-3.0"
+}
